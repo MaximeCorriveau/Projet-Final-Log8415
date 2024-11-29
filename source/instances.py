@@ -1,7 +1,5 @@
 import boto3
 import os
-import paramiko
-import time
 from scripts import My_SQL_script
 
 class EC2Manager:
@@ -11,7 +9,6 @@ class EC2Manager:
         self.instances_large = []
         self.key_pair_name = 'my_key_pair'
         self.userData_template = My_SQL_script
-        self.ssh = paramiko.SSHClient()
 
     def create_key_pair(self):
         try:
@@ -41,48 +38,6 @@ class EC2Manager:
         except self.ec2_client.exceptions.ClientError as e:
             print(f"Error deleting key pair: {e}")
 
-    def wait_for_userdata_execution(self, instance_ip, key_file):
-        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        while True:
-            try:
-                # Attempt to connect to the instance
-                self.ssh.connect(instance_ip, username="ubuntu", key_filename=key_file)
-                print("SSH connection established.")
-                while True:
-                    try:
-                        # Execute the command to check User Data execution in the instance output log
-                        stdin, stdout, stderr = self.ssh.exec_command('tail -n 10 /var/log/cloud-init-output.log')
-                        output = stdout.read().decode()
-                        print(output)
-                        if "finished at" in output:
-                            print("User Data script execution completed.")
-                            self.get_outputs()
-                            self.ssh.close()
-                            return 
-                        print("User Data script is still running. Checking again...")
-                        time.sleep(10)
-
-                    except paramiko.SSHException as ssh_err:
-                        print(f"SSH command execution failed: {ssh_err}")
-                        print("Waiting for the connection to come back...")
-                        break  # Break to outer loop to try reconnecting
-                self.ssh.close()
-                return
-
-            except (paramiko.ssh_exception.NoValidConnectionsError, paramiko.ssh_exception.SSHException) as e:
-                print("SSH connection failed. Retrying...")
-                time.sleep(10)
-            except Exception as e:
-                print(f"An unexpected error occurred: {e}, Retrying...")
-                time.sleep(20)
-
-    def get_outputs(self):
-        scp = paramiko.SFTPClient.from_transport(self.ssh.get_transport())
-        scp.get('/home/ubuntu/hadoop_time_exploration.txt','hadoop_exploration.txt')
-        scp.get('/home/ubuntu/ubuntu_time_exploration.txt','ubuntu_exploration.txt')
-        scp.get('/home/ubuntu/output_hadoop_times.txt', 'output_hadoop.txt')
-        scp.get('/home/ubuntu/output_spark_times.txt', 'output_spark.txt')
-        scp.close()
         
 
     def launch_instances(self, security_group_id):
@@ -98,8 +53,7 @@ class EC2Manager:
 
         for instance in self.instances_large:
             instance.wait_until_running()
-            instance.reload()
-            self.wait_for_userdata_execution(instance.public_ip_address, f"{self.key_pair_name}.pem")          
+            instance.reload()          
 
     def create_security_group(self, vpc_id):
         response = self.ec2.create_security_group(

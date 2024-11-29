@@ -1,13 +1,32 @@
 # Setup Hadoop and Spark
 My_SQL_script = '''#!/bin/bash
+
+# Mettre à jour et installer les paquets nécessaires
 sudo apt-get update && sudo apt-get upgrade -y
 sudo apt-get install -y python3 python3-pip default-jdk wget scala git
-sudo apt-get install -y  mysql-server 
+sudo apt-get install -y mysql-server sysbench
+sudo apt-get install -y unzip
+
+PASSWORD="password"
+sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$PASSWORD'; FLUSH PRIVILEGES;"
+
 cd /home/ubuntu
 wget https://downloads.mysql.com/docs/sakila-db.zip
 unzip sakila-db.zip
 
+mysql -u root -p$PASSWORD -e "source /home/ubuntu/sakila-db/sakila-schema.sql; source /home/ubuntu/sakila-db/sakila-data.sql;"
 
+sudo sysbench /usr/share/sysbench/oltp_read_only.lua \
+    --mysql-db=sakila \
+    --mysql-user=root \
+    --mysql-password=$PASSWORD \
+    prepare
+
+sudo sysbench /usr/share/sysbench/oltp_read_only.lua \
+    --mysql-db=sakila \
+    --mysql-user=root \
+    --mysql-password=$PASSWORD \
+    run
 '''
 
 # 4.4 Who wins ?
