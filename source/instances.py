@@ -1,6 +1,6 @@
 import boto3
 import os
-from scripts import My_SQL_script
+from scripts import Micros_script
 
 class EC2Manager:
     def __init__(self):
@@ -8,7 +8,7 @@ class EC2Manager:
         self.ec2_client = boto3.client('ec2', region_name='us-east-1')
         self.instances_large = []
         self.key_pair_name = 'my_key_pair'
-        self.userData_template = My_SQL_script
+        self.userData_template = Micros_script
 
     def create_key_pair(self):
         try:
@@ -50,8 +50,19 @@ class EC2Manager:
             KeyName=self.key_pair_name,
             UserData=self.userData_template
         )
-
+        self.instances_large = self.ec2.create_instances(
+            ImageId='ami-0e86e20dae9224db8',
+            MinCount=1,
+            MaxCount=1,
+            InstanceType='t2.large',
+            SecurityGroupIds=[security_group_id],
+            KeyName=self.key_pair_name,
+            UserData=self.userData_template
+        )
         for instance in self.instances_large:
+            instance.wait_until_running()
+            instance.reload()
+        for instance in self.instances_micros:
             instance.wait_until_running()
             instance.reload()          
 

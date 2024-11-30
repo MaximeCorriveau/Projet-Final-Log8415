@@ -1,21 +1,29 @@
-# Setup Hadoop and Spark
-My_SQL_script = '''#!/bin/bash
+Micros_script = '''#!/bin/bash
 
 # Mettre à jour et installer les paquets nécessaires
 sudo apt-get update && sudo apt-get upgrade -y
 sudo apt-get install -y python3 python3-pip default-jdk wget scala git
-sudo apt-get install -y mysql-server sysbench
-sudo apt-get install -y unzip
+sudo apt-get install -y mysql-server sysbench unzip
 
+# Créer un environnement virtuel Python pour FastAPI
+cd /home/ubuntu
+sudo -u ubuntu python3 -m venv fastapi_env
+source fastapi_env/bin/activate
+
+# Installer FastAPI et les dépendances nécessaires
+pip install fastapi uvicorn pymysql
+
+# Configurer MySQL
 PASSWORD="password"
 sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$PASSWORD'; FLUSH PRIVILEGES;"
 
-cd /home/ubuntu
+# Télécharger et importer les données Sakila
 wget https://downloads.mysql.com/docs/sakila-db.zip
 unzip sakila-db.zip
 
 mysql -u root -p$PASSWORD -e "source /home/ubuntu/sakila-db/sakila-schema.sql; source /home/ubuntu/sakila-db/sakila-data.sql;"
 
+# Configurer et exécuter un benchmark Sysbench
 sudo sysbench /usr/share/sysbench/oltp_read_only.lua \
     --mysql-db=sakila \
     --mysql-user=root \
@@ -27,49 +35,62 @@ sudo sysbench /usr/share/sysbench/oltp_read_only.lua \
     --mysql-user=root \
     --mysql-password=$PASSWORD \
     run
-'''
 
-# 4.4 Who wins ?
-# Download the following text files from the Gutenberg project
-benchmark_datasets= '''#!/bin/bash
-wget https://www.gutenberg.ca/ebooks/buchanj-midwinter/buchanj-midwinter-00-t.txt # buchanj-midwinter-00-t.txt
-wget https://www.gutenberg.ca/ebooks/carman-farhorizons/carman-farhorizons-00-t.txt # carman-farhorizons-00-t.txt
-wget https://www.gutenberg.ca/ebooks/colby-champlain/colby-champlain-00-t.txt # colby-champlain-00-t.txt
-wget https://www.gutenberg.ca/ebooks/cheyneyp-darkbahama/cheyneyp-darkbahama-00-t.txt # cheyneyp-darkbahama-00-t.txt
-wget https://www.gutenberg.ca/ebooks/delamare-bumps/delamare-bumps-00-t.txt # delamare-bumps-00-t.txt
-wget https://www.gutenberg.ca/ebooks/charlesworth-scene/charlesworth-scene-00-t.txt # charlesworth-scene-00-t.txt
-wget https://www.gutenberg.ca/ebooks/delamare-lucy/delamare-lucy-00-t.txt # delamare-lucy-00-t.txt
-wget https://www.gutenberg.ca/ebooks/delamare-myfanwy/delamare-myfanwy-00-t.txt  # delamare-myfanwy-00-t.txt
-wget https://www.gutenberg.ca/ebooks/delamare-penny/delamare-penny-00-t.txt # delamare-penny-00-t.txt
+# Créer un fichier FastAPI pour servir l'API SQL
+cat <<EOF > /home/ubuntu/app.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import pymysql
 
-files=(
-    "/home/ubuntu/buchanj-midwinter-00-t.txt"
-    "/home/ubuntu/carman-farhorizons-00-t.txt"
-    "/home/ubuntu/colby-champlain-00-t.txt"
-    "/home/ubuntu/cheyneyp-darkbahama-00-t.txt"
-    "/home/ubuntu/delamare-bumps-00-t.txt"
-    "/home/ubuntu/charlesworth-scene-00-t.txt"
-    "/home/ubuntu/delamare-lucy-00-t.txt"
-    "/home/ubuntu/delamare-myfanwy-00-t.txt"
-    "/home/ubuntu/delamare-penny-00-t.txt"
-)
+app = FastAPI()
 
-hadoop_times_file="output_hadoop_times.txt"
-hadoop_output_dir="/home/ubuntu/output"
-hadoop_cmd="/usr/local/hadoop/bin/hadoop jar /usr/local/hadoop/share/hadoop/mapreduce/hadoop-mapreduce-examples-3.4.0.jar wordcount"
+# Configuration de la base de données
+DB_HOST = "localhost"
+DB_USER = "root"
+DB_PASSWORD = "$PASSWORD"
+DB_NAME = "sakila"
 
-spark_times_file="output_spark_times.txt"
-spark_cmd="spark-submit /usr/local/spark/examples/src/main/python/wordcount.py"
+class SQLRequest(BaseModel):
+    query: str
 
-touch "$hadoop_times_file"
+@app.post("/execute-sql")
+async def execute_sql(request: SQLRequest):
+    try:
+        connection = pymysql.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+        cursor = connection.cursor()
+        cursor.execute(request.query)
+        result = cursor.fetchall()
+        connection.commit()
+        cursor.close()
+        connection.close()
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+EOF
 
-for file in "${files[@]}"; do
-    for run in {1..3}; do
-        if [ -d "$hadoop_output_dir" ]; then
-            rm -r "$hadoop_output_dir"
-        fi
-        { time $hadoop_cmd "$file" "$hadoop_output_dir" > /dev/null; } 2>> "$hadoop_times_file"
-        { time $spark_cmd "$file" > /dev/null; } 2>> "$spark_times_file"
-    done
-done
+# Configurer un service systemd pour exécuter l'application FastAPI
+cat <<EOF | sudo tee /etc/systemd/system/fastapi.service
+[Unit]
+Description=FastAPI Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/home/ubuntu/fastapi_env/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Démarrer le service FastAPI
+sudo systemctl daemon-reload
+sudo systemctl start fastapi.service
+sudo systemctl enable fastapi.service
 '''
