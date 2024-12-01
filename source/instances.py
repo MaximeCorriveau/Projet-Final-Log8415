@@ -1,6 +1,6 @@
 import boto3
 import os
-from scripts import worker_script, manager_script, gatekeeper_script, trust_host_script
+from scripts import worker_script, manager_script, gatekeeper_script, trust_host_script, proxy_script
 
 class EC2Manager:
     def __init__(self):
@@ -13,6 +13,7 @@ class EC2Manager:
         self.userData_manager = manager_script
         self.userData_gatekeeper = gatekeeper_script
         self.userData_trust_host = trust_host_script
+        self.userData_proxy = proxy_script
 
     def create_key_pair(self):
         try:
@@ -61,6 +62,7 @@ class EC2Manager:
         self.wait_for_instances(self.instances_worker)
         self.worker_instances = self.instances_worker
         worker_ips = [instance.private_ip_address for instance in self.worker_instances]
+        print(f"Worker IPs: {worker_ips}")
 
         self.userData_manager = self.userData_manager.replace("worker1_ip", worker_ips[0]).replace("worker2_ip", worker_ips[1])
         self.instances_manager = self.ec2.create_instances(
@@ -75,8 +77,11 @@ class EC2Manager:
         self.wait_for_instances(self.instances_manager)
         self.manager_instance = self.instances_manager[0]
         self.manager_ip = self.manager_instance.public_ip_address
+        print(f"Manager IP: {self.manager_ip}")
         # Lancer une instance t2.large
 
+        self.userData_proxy = self.userData_proxy.replace("manager_ip", self.manager_ip)
+        self.userData_proxy = self.userData_proxy.replace("worker1_ip", worker_ips[0]).replace("worker2_ip", worker_ips[1])
         self.instances_proxy = self.ec2.create_instances(
             ImageId='ami-0e86e20dae9224db8',
             MinCount=1,
@@ -84,13 +89,14 @@ class EC2Manager:
             InstanceType='t2.large',
             SecurityGroupIds=[security_group_id],
             KeyName=self.key_pair_name,
-            UserData=self.userData_template
+            UserData=self.userData_proxy
         )
         self.wait_for_instances(self.instances_proxy)
         self.proxy_instance = self.instances_proxy[0]
         self.proxy_ip = self.proxy_instance.public_ip_address
 
         self.userData_trust_host = self.userData_trust_host.replace("proxy_ip", self.proxy_ip)
+        print(f"Proxy IP: {self.proxy_ip}")
         self.instances_trust_host = self.ec2.create_instances(
             ImageId='ami-0e86e20dae9224db8',
             MinCount=1,
@@ -103,7 +109,7 @@ class EC2Manager:
         self.wait_for_instances(self.instances_trust_host)
         self.trust_host_instance = self.instances_trust_host[0]
         self.trust_host_ip = self.trust_host_instance.public_ip_address
-
+        print(f"Trust Host IP: {self.trust_host_ip}")
         self.userData_gatekeeper = self.userData_gatekeeper.replace("trust_host_ip", self.trust_host_ip)
         self.instances_gatekeeper = self.ec2.create_instances(
             ImageId='ami-0e86e20dae9224db8',

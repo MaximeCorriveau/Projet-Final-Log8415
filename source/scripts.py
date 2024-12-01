@@ -139,9 +139,6 @@ sudo sysbench /usr/share/sysbench/oltp_read_only.lua \
     --mysql-password=$PASSWORD \
     run
 
-# Enregistrer les adresses IP des instances t2.micro (workers et manager)
-WORKER_IPS=("worker1_ip" "worker2_ip")
-echo "Worker IPs: ${WORKER_IPS[@]}" > /home/ubuntu/worker_ips.txt
 
 # Créer un fichier FastAPI pour servir l'API SQL
 cat <<EOF > /home/ubuntu/app.py
@@ -210,19 +207,122 @@ sudo systemctl daemon-reload
 sudo systemctl start fastapi.service
 sudo systemctl enable fastapi.service
 '''
+proxy_script = '''#!/bin/bash
+
+# Update and install required packages
+sudo apt-get update -y
+sudo apt-get upgrade -y
+sudo apt-get install -y python3 python3-venv python3-pip curl
+
+# Create and activate a virtual environment
+cd /home/ubuntu
+python3 -m venv api_env
+source api_env/bin/activate
+
+# Install Python dependencies
+pip install fastapi uvicorn requests
+
+# Create the FastAPI application
+cat <<EOF > server.py
+from fastapi import FastAPI, Request, HTTPException
+import requests
+import random
+import json
+import logging
+
+service = FastAPI()
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("proxy")
+
+workers = ["worker1_ip", "worker2_ip"]
+
+MANAGER_NODE_URL = f"http://manager_ip:8000"
+WORKER_NODE_URLS = [f"http://{ip}:8000" for ip in workers]
+
+def select_fastest_node():
+    response_times = {}
+    for node in WORKER_NODE_URLS:
+        try:
+            response = requests.get(node, timeout=2)
+            response_times[node] = response.elapsed.total_seconds()
+        except requests.exceptions.RequestException:
+            response_times[node] = float("inf")
+    return min(response_times, key=response_times.get)
+
+@service.get("/")
+def health_status():
+    return {"status": "Service is operational"}
+
+@service.post("/")
+async def handle_request(req: Request):
+    payload = await req.json()
+    log.info(f"Incoming request: {payload}")
+    action_type = payload.get("action", "").lower()
+    if action_type == "write":
+        try:
+            response = requests.post(MANAGER_NODE_URL, json=payload)
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    elif action_type == "read":
+        strategy = payload.get("strategy", "default")
+        target_node = None
+        if strategy == "default":
+            target_node = MANAGER_NODE_URL
+        elif strategy == "randomized":
+            target_node = random.choice(WORKER_NODE_URLS)
+        elif strategy == "optimized":
+            target_node = select_fastest_node()
+        if target_node:
+            try:
+                response = requests.post(target_node, json=payload)
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=400, detail="Invalid action type")
+EOF
+
+# Create a systemd service file
+cat <<EOF | sudo tee /etc/systemd/system/api_service.service
+[Unit]
+Description=FastAPI Service Node
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/home/ubuntu/api_env/bin/uvicorn server:service --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Reload systemd and start the service
+sudo systemctl daemon-reload
+sudo systemctl enable api_service.service
+sudo systemctl start api_service.service
+
+# Verify the service status
+sudo systemctl status api_service.service
+'''
 
 trust_host_script = '''#!/bin/bash
 
-# Mise à jour des paquets
 sudo apt-get update -y
 
-# Installation de Python3 et de pip
-sudo apt-get install -y python3 python3-pip
+# Installation de Python3, pip et venv
+sudo apt-get install -y python3 python3-pip python3.12-venv
 
-# Installation des dépendances nécessaires pour l'application
-pip3 install fastapi uvicorn requests
+# Création de l'environnement virtuel
+sudo -u ubuntu python3 -m venv /home/ubuntu/venv
 
-# Création du fichier de l'application
+# Installation des dépendances
+source /home/ubuntu/venv/bin/activate
+pip install fastapi uvicorn requests
+
+# Création de l'application
 cat <<EOF > /home/ubuntu/app.py
 from fastapi import FastAPI, HTTPException, Request, status
 import requests
@@ -234,7 +334,7 @@ PROXY_URL = f"http://proxy_ip:8000"
 
 @app.get("/")
 async def health_check():
-    return "Trusted Host OK"
+    return "Trust Host OK"
 
 @app.get("/mode")
 async def get_mode():
@@ -264,8 +364,27 @@ async def forward_query(data: dict):
         raise HTTPException(status_code=500, detail=str(e))
 EOF
 
-# Lancer l'application FastAPI avec Uvicorn
-nohup uvicorn /home/ubuntu/app.py --host 0.0.0.0 --port 8000 > /home/ubuntu/fastapi.log 2>&1 &
+# Création du fichier de service systemd pour FastAPI
+cat <<EOF > /etc/systemd/system/trust_host.service
+[Unit]
+Description=Trust Host FastAPI Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+Environment="PATH=/home/ubuntu/venv/bin"
+ExecStart=/home/ubuntu/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Recharger systemd, démarrer et activer le service
+sudo systemctl daemon-reload
+sudo systemctl start trust_host.service
+sudo systemctl enable trust_host.service
 '''
 gatekeeper_script = '''#!/bin/bash
 
@@ -295,8 +414,8 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# URL du Trusted Host
-TRUSTED_HOST_URL = f"http://trust_host_ip:8000"
+# URL du Trust Host
+TRUST_HOST_URL = f"http://trust_host_ip:8000"
 
 # Configuration des logs
 logging.basicConfig(level=logging.INFO)
@@ -323,10 +442,10 @@ async def validate_and_forward(request: QueryRequest):
         logger.warning("Invalid request format")
         raise HTTPException(status_code=400, detail="Invalid request format")
 
-    # Transmettre les requêtes validées au Trusted Host
+    # Transmettre les requêtes validées au Trust Host
     try:
-        response = requests.post(f"{TRUSTED_HOST_URL}/query", json=data)
-        logger.info(f"Response from trusted host: {response.status_code}")
+        response = requests.post(f"{TRUST_HOST_URL}/query", json=data)
+        logger.info(f"Response from trust host: {response.status_code}")
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"Error forwarding request: {str(e)}")
