@@ -1,6 +1,8 @@
 import boto3
 import os
 from scripts import worker_script, manager_script, gatekeeper_script, trust_host_script, proxy_script
+import time
+import requests
 
 class EC2Manager:
     def __init__(self):
@@ -236,9 +238,6 @@ class EC2Manager:
 
     
     def benchmark(self):
-        import time
-        import requests
-
         gatekeeper_ip = self.gatekeeper_instance.public_ip_address
         print(f"Gatekeeper IP: {gatekeeper_ip}")
         gatekeeper_url = f"http://{gatekeeper_ip}:5000"  # Gatekeeper runs on port 5000
@@ -262,7 +261,12 @@ class EC2Manager:
 
                 for i in range(num_requests):
                     start_time = time.time()
-                    payload = {"query": query, "type": query_type, "mode": mode}
+                    # Payload in the updated format
+                    payload = {
+                        "action": query_type,   # Specifies "read" or "write"
+                        "query": query,        # The actual query
+                        "mode": mode           # Execution mode (direct_hit, random, etc.)
+                    }
                     try:
                         response = requests.post(gatekeeper_url, json=payload)
                         elapsed_time = time.time() - start_time
@@ -289,8 +293,8 @@ class EC2Manager:
         print("\n=== Benchmark results summary ===")
         for mode, stats in results.items():
             print(f"Mode: {mode}")
-            print(f"  Average Read Time: {stats.get('read_average_time', 'N/A'):.4f} seconds")
-            print(f"  Average Write Time: {stats.get('write_average_time', 'N/A'):.4f} seconds")
+            print(f"  Average Read Time: {stats.get('read_average_time', float('inf')):.4f} seconds")
+            print(f"  Average Write Time: {stats.get('write_average_time', float('inf')):.4f} seconds")
             if stats.get("read_errors"):
                 print(f"  Read Errors: {stats['read_errors']}")
             if stats.get("write_errors"):

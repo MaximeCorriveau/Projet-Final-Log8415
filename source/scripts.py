@@ -258,29 +258,53 @@ def health_status():
 async def handle_request(req: Request):
     payload = await req.json()
     log.info(f"Incoming request: {payload}")
+    
+    # Extract and validate fields
     action_type = payload.get("action", "").lower()
+    query = payload.get("query")
+    mode = payload.get("mode")
+
+    # Validate required fields
+    if not query or not action_type or not mode:
+        log.error("Missing required fields in the payload")
+        raise HTTPException(status_code=400, detail="Missing required fields in the payload")
+    
+    # Handle write actions
     if action_type == "write":
         try:
             response = requests.post(MANAGER_NODE_URL, json=payload)
             return response.json()
         except requests.exceptions.RequestException as e:
+            log.error(f"Error forwarding request: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
+    
+    # Handle read actions
     elif action_type == "read":
-        strategy = payload.get("strategy", "default")
         target_node = None
-        if strategy == "default":
+        
+        # Determine target node based on mode
+        if mode == "direct_hit":
             target_node = MANAGER_NODE_URL
-        elif strategy == "randomized":
+        elif mode == "random":
             target_node = random.choice(WORKER_NODE_URLS)
-        elif strategy == "optimized":
+        elif mode == "customized":
             target_node = select_fastest_node()
+
         if target_node:
             try:
                 response = requests.post(target_node, json=payload)
                 return response.json()
             except requests.exceptions.RequestException as e:
-                raise HTTPException(status_code=500, detail=str(e))
-    raise HTTPException(status_code=400, detail="Invalid action type")
+                log.error(f"Error forwarding request: {str(e)}")
+                raise HTTPException(status_code=501, detail=str(e))
+        else:
+            log.error("Invalid mode specified")
+            raise HTTPException(status_code=400, detail="Invalid mode specified")
+    
+    # Handle invalid action types
+    else:
+        log.error("Invalid action type")
+        raise HTTPException(status_code=400, detail="Invalid action type")
 EOF
 
 # Create a systemd service file
@@ -327,32 +351,20 @@ cat <<EOF > /home/ubuntu/app.py
 from fastapi import FastAPI, HTTPException, Request, status
 import requests
 import json
+import logging
+
+
 
 app = FastAPI()
 
 PROXY_URL = f"http://proxy_ip:8000"
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("TrustHostApp")
+
 @app.get("/")
 async def health_check():
     return "Trust Host OK"
-
-@app.get("/mode")
-async def get_mode():
-    try:
-        response = requests.get(f"{PROXY_URL}/mode")
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/mode")
-async def post_mode(data: dict):
-    try:
-        response = requests.post(f"{PROXY_URL}/mode", json=data)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/query")
 async def forward_query(data: dict):
@@ -361,6 +373,7 @@ async def forward_query(data: dict):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
+        logger.error(f"Error forwarding request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 EOF
 
@@ -423,7 +436,9 @@ logger = logging.getLogger("GatekeeperApp")
 
 
 class QueryRequest(BaseModel):
+    action: str
     query: str
+    mode: str    
 
 
 @app.get("/")
