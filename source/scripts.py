@@ -1,13 +1,11 @@
 worker_script = '''#!/bin/bash
-
 # Mettre à jour et installer les paquets nécessaires
 sudo apt-get update && sudo apt-get upgrade -y
 sudo apt-get install -y python3 python3-pip default-jdk wget scala git
+sudo apt-get install -y mysql-server unzip
 sudo apt-get install -y mysql-server sysbench unzip
 sudo apt-get install -y python3.12-venv
 sudo apt-get install -y python3-full
-
-
 
 # Créer un environnement virtuel Python pour FastAPI
 cd /home/ubuntu
@@ -38,13 +36,19 @@ sudo sysbench /usr/share/sysbench/oltp_read_only.lua \
     --mysql-db=sakila \
     --mysql-user=root \
     --mysql-password=$PASSWORD \
-    run
+    run > sysbench_results.txt
 
 # Créer un fichier FastAPI pour servir l'API SQL
 cat <<EOF > /home/ubuntu/app.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pymysql
+import logging
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("worker")
+log.setLevel(logging.INFO)
+
 
 app = FastAPI()
 
@@ -57,7 +61,7 @@ DB_NAME = "sakila"
 class SQLRequest(BaseModel):
     query: str
 
-@app.post("/execute-sql")
+@app.post("/")
 async def execute_sql(request: SQLRequest):
     try:
         connection = pymysql.connect(
@@ -72,8 +76,10 @@ async def execute_sql(request: SQLRequest):
         connection.commit()
         cursor.close()
         connection.close()
+        log.info(f"Executed SQL query: {request.query}")
         return {"status": "success", "result": result}
     except Exception as e:
+        log.error(f"Error executing SQL query: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 EOF
 
@@ -137,7 +143,7 @@ sudo sysbench /usr/share/sysbench/oltp_read_only.lua \
     --mysql-db=sakila \
     --mysql-user=root \
     --mysql-password=$PASSWORD \
-    run
+    run > sysbench_results.txt
 
 
 # Créer un fichier FastAPI pour servir l'API SQL
@@ -153,37 +159,74 @@ app = FastAPI()
 # Configuration de la base de données
 DB_HOST = "localhost"
 DB_USER = "root"
-DB_PASSWORD = "$PASSWORD"
+DB_PASSWORD = "password"
 DB_NAME = "sakila"
 
 WORKER_IPS = ["worker1_ip", "worker2_ip"]
 WORKER_URLS = [f"http://{ip}:8000" for ip in WORKER_IPS]
 
-def get_fastest_worker():
-    response_times = {}
-    for worker in WORKER_URLS:
-        try:
-            response = requests.get(worker + "/health", timeout=2)
-            response_times[worker] = response.elapsed.total_seconds()
-        except requests.exceptions.RequestException:
-            response_times[worker] = float('inf')
-    return min(response_times, key=response_times.get)
-
 class SQLRequest(BaseModel):
+    action: str  # "read" ou "write"
     query: str
 
 @app.get("/")
 def health_check():
     return {"status": "Manager OK"}
 
+def execute_query_locally(query):
+    """Exécute une requête SQL sur la base de données locale."""
+    try:
+        connection = pymysql.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            if query.strip().lower().startswith("select"):
+                result = cursor.fetchall()
+            else:
+                connection.commit()
+                result = {"status": "success"}
+        return result
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        connection.close()
+
+def propagate_to_workers(request):
+    """Envoie une requête aux workers."""
+    responses = []
+    for worker in WORKER_URLS:
+        try:
+            response = requests.post(worker, json=request.dict())
+            responses.append({"worker": worker, "status": response.status_code})
+        except requests.exceptions.RequestException as e:
+            responses.append({"worker": worker, "error": str(e)})
+    return responses
+
 @app.post("/")
 async def handle_request(request: SQLRequest):
-    fastest_worker = get_fastest_worker()
-    try:
-        response = requests.post(fastest_worker + "/execute-sql", json=request.dict())
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if request.action == "read":
+        # Traiter la requête `read` localement
+        result = execute_query_locally(request.query)
+        return {"action": "read", "result": result}
+
+    elif request.action == "write":
+        # Exécuter la requête `write` localement
+        local_result = execute_query_locally(request.query)
+        
+        # Propager la requête aux workers
+        worker_responses = propagate_to_workers(request)
+        return {
+            "action": "write",
+            "local_result": local_result,
+            "worker_responses": worker_responses,
+        }
+
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action type. Use 'read' or 'write'.")
 EOF
 
 # Configurer un service systemd pour exécuter l'application FastAPI
@@ -227,7 +270,6 @@ cat <<EOF > server.py
 from fastapi import FastAPI, Request, HTTPException
 import requests
 import random
-import json
 import logging
 
 service = FastAPI()
@@ -240,9 +282,12 @@ workers = ["worker1_ip", "worker2_ip"]
 MANAGER_NODE_URL = f"http://manager_ip:8000"
 WORKER_NODE_URLS = [f"http://{ip}:8000" for ip in workers]
 
+# Include the manager node in the list of possible targets for read requests
+ALL_NODES = WORKER_NODE_URLS + [MANAGER_NODE_URL]
+
 def select_fastest_node():
     response_times = {}
-    for node in WORKER_NODE_URLS:
+    for node in ALL_NODES:  # Include the manager in the selection process
         try:
             response = requests.get(node, timeout=2)
             response_times[node] = response.elapsed.total_seconds()
@@ -286,9 +331,9 @@ async def handle_request(req: Request):
         if mode == "direct_hit":
             target_node = MANAGER_NODE_URL
         elif mode == "random":
-            target_node = random.choice(WORKER_NODE_URLS)
+            target_node = random.choice(ALL_NODES)  # Randomly select including the manager
         elif mode == "customized":
-            target_node = select_fastest_node()
+            target_node = select_fastest_node()  # Fastest from all nodes including the manager
 
         if target_node:
             try:
