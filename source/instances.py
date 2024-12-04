@@ -259,7 +259,7 @@ class EC2Manager:
             errors = {"read_errors": [], "write_errors": []}
 
             for query_type, query in queries.items():
-                num_requests = 2  # Adjust as needed
+                num_requests = 1000  # Adjust as needed
                 times = []
                 print(f"  {query_type.capitalize()} Queries:")
 
